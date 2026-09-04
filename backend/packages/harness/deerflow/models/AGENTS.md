@@ -13,3 +13,7 @@
 - Preserves vLLM's non-standard assistant `reasoning` field on full responses, streaming deltas, and follow-up tool-call turns
 - Designed for configs that enable thinking through `extra_body.chat_template_kwargs.enable_thinking` on vLLM 0.19.0 Qwen reasoning models, while accepting the older `thinking` alias
 - `cumulative_stream_usage` is an opt-in model setting (default `false`) for endpoints that repeat cumulative token totals on each streaming chunk. The provider converts snapshots to deltas only when a stable completion id is present, isolates interleaved streams by id, and leaves the original usage untouched otherwise. Per-model tracking is lock-protected and cleared on the trailing empty-`choices` frame whether or not that frame carries usage. A soft cap of 1024 ids evicts only entries idle for at least one hour; active streams may temporarily exceed the cap so eviction cannot corrupt their deltas. Regression coverage lives in `tests/test_vllm_provider.py`.
+
+### MindIE Provider (`packages/harness/deerflow/models/mindie_provider.py`)
+
+- Tool-enabled async streaming simulates chunks from a non-streaming result. Preserve the result's `usage_metadata` on exactly one chunk, including empty-content and tool-only replies, so chunk aggregation and token-budget accounting retain the original totals. Regression coverage lives in `tests/test_mindie_provider.py`.

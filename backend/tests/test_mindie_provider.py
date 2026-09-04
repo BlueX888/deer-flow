@@ -4,6 +4,7 @@ Unit tests for MindIEChatModel adapter.
 
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -421,6 +422,34 @@ class TestAGenerate:
 
 
 class TestAStream:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("content", ["", "A reply long enough to span multiple chunks."])
+    @pytest.mark.parametrize("with_tool_call", [False, True])
+    async def test_tool_enabled_stream_preserves_usage_once(self, content, with_tool_call):
+        tool_calls = [{"id": "call_1", "type": "function", "function": {"name": "weather", "arguments": "{}"}}] if with_tool_call else []
+        response = {
+            "id": "chatcmpl-offline",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "mindie-test",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": content, "tool_calls": tool_calls}, "finish_reason": "tool_calls" if with_tool_call else "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120, "prompt_tokens_details": {"cached_tokens": 10}},
+        }
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=response))) as client:
+            model = MindIEChatModel(model="mindie-test", api_key="test-key", http_async_client=client)
+            bound = model.bind_tools([{"name": "weather", "description": "Get weather", "parameters": {"type": "object", "properties": {}}}])
+            expected = await bound.ainvoke("What is the weather?")
+            chunks = [chunk async for chunk in bound.astream("What is the weather?")]
+
+        combined = chunks[0]
+        for chunk in chunks[1:]:
+            combined += chunk
+        assert combined.usage_metadata == expected.usage_metadata
+        assert sum(chunk.usage_metadata is not None for chunk in chunks) == 1
+        assert combined.content == expected.content
+        assert combined.tool_calls == expected.tool_calls
+
     async def _collect(self, gen):
         chunks = []
         async for chunk in gen:

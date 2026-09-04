@@ -244,11 +244,13 @@ class MindIEChatModel(ChatOpenAI):
                 chunk_size = 15
                 for i in range(0, len(content), chunk_size):
                     chunk_text = content[i : i + chunk_size]
-                    chunk_msg = AIMessageChunk(content=chunk_text, id=msg.id, response_metadata=msg.response_metadata if i == 0 else {})
+                    # Usage is cumulative for the full result; attach it once so
+                    # LangChain's additive chunk merge does not multiply it.
+                    chunk_msg = AIMessageChunk(content=chunk_text, id=msg.id, response_metadata=msg.response_metadata if i == 0 else {}, usage_metadata=msg.usage_metadata if i == 0 else None)
                     yield ChatGenerationChunk(message=chunk_msg, generation_info=gen.generation_info if i == 0 else None)
 
                 if standard_tool_calls:
                     yield ChatGenerationChunk(message=AIMessageChunk(content="", id=msg.id, tool_calls=standard_tool_calls, invalid_tool_calls=getattr(msg, "invalid_tool_calls", [])))
             else:
-                chunk_msg = AIMessageChunk(content=content, id=msg.id, tool_calls=standard_tool_calls, invalid_tool_calls=getattr(msg, "invalid_tool_calls", []))
+                chunk_msg = AIMessageChunk(content=content, id=msg.id, tool_calls=standard_tool_calls, invalid_tool_calls=getattr(msg, "invalid_tool_calls", []), usage_metadata=msg.usage_metadata)
                 yield ChatGenerationChunk(message=chunk_msg, generation_info=gen.generation_info)
