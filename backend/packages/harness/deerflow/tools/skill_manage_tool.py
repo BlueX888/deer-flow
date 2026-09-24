@@ -7,6 +7,7 @@ import json
 import logging
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, NoReturn
 from weakref import WeakValueDictionary
@@ -31,14 +32,25 @@ from deerflow.tools.types import Runtime
 logger = logging.getLogger(__name__)
 
 # Lock granularity: (user_id, skill_name) to avoid cross-user blocking.
-_skill_locks: WeakValueDictionary[tuple[str, str], asyncio.Lock] = WeakValueDictionary()
+# A plain threading.Lock, not asyncio.Lock: the embedded/TUI sync tool-call
+# path (DeerFlowClient.stream() -> LangGraph ToolNode._func -> a
+# ThreadPoolExecutor -> make_sync_tool_wrapper's per-call asyncio.run())
+# invokes _skill_manage_impl from a fresh event loop on a fresh OS thread for
+# every concurrent tool call, and one turn may issue two skill_manage calls
+# for the same (user, skill). An asyncio.Lock binds to whichever loop first
+# contends on it; a second caller's release/wake-up crossing loops without
+# call_soon_threadsafe either deadlocks silently or raises "bound to a
+# different event loop". threading.Lock has no loop affinity, so it is safe
+# to share across however many event loops/threads call into the same
+# (user, skill) lock.
+_skill_locks: WeakValueDictionary[tuple[str, str], threading.Lock] = WeakValueDictionary()
 
 
-def _get_lock(user_id: str, name: str) -> asyncio.Lock:
+def _get_lock(user_id: str, name: str) -> threading.Lock:
     key = (user_id, name)
     lock = _skill_locks.get(key)
     if lock is None:
-        lock = asyncio.Lock()
+        lock = threading.Lock()
         _skill_locks[key] = lock
     return lock
 
@@ -139,7 +151,34 @@ async def _skill_manage_impl(
     thread_id = _get_thread_id(runtime)
     skill_storage = get_or_new_user_skill_storage(user_id)
 
-    async with lock:
+    # Acquire the OS-level lock off-thread so a blocking wait never blocks this
+    # event loop, then release it synchronously (release() never blocks). This
+    # keeps the mutual exclusion of the old `async with lock:` while remaining
+    # safe when callers are on different event loops/threads (see _get_lock).
+    #
+    # The acquisition itself runs as an explicit Task, shielded from this
+    # coroutine's own cancellation. A bare `await asyncio.to_thread(lock.acquire)`
+    # cannot be safely cancelled: once the executor thread has started running
+    # lock.acquire(), Python has no way to stop it, so a cancellation delivered
+    # at that await would still let the thread go on to acquire the lock later
+    # (whenever the current holder releases it) with this coroutine already
+    # gone and nobody left to call release() -- the lock would stay locked
+    # forever and every later call for this (user, skill) would block
+    # permanently at this same line. A cancelled caller instead waits --
+    # shielded on every retry -- until the acquisition actually lands, then
+    # releases the lock right away and re-raises.
+    acquire_task = asyncio.create_task(asyncio.to_thread(lock.acquire), name=f"skill-manage-lock-acquire:{user_id}:{name}")
+    try:
+        await asyncio.shield(acquire_task)
+    except asyncio.CancelledError:
+        while not acquire_task.done():
+            try:
+                await asyncio.shield(acquire_task)
+            except asyncio.CancelledError:
+                continue
+        lock.release()
+        raise
+    try:
         if action == "create":
             if await _to_thread(skill_storage.custom_skill_exists, name):
                 raise ValueError(f"Custom skill '{name}' already exists.")
@@ -257,6 +296,8 @@ async def _skill_manage_impl(
             # ensure_custom_skill_is_editable with category-specific messages.
             raise ValueError(f"'{name}' is a read-only skill (built-in or legacy shared). To customise it, create your own version with the same name.")
         raise ValueError(f"Unsupported action '{action}'.")
+    finally:
+        lock.release()
 
 
 @tool("skill_manage", parse_docstring=True)
