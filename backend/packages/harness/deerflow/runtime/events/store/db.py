@@ -43,6 +43,13 @@ class DbRunEventStore(RunEventStore):
         # the generation alive until they drain.
         self._write_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._write_lock_pins: dict[str, asyncio.Lock] = {}
+        # Per-thread floor on seq assignment. delete_by_run lowers max(seq)
+        # over the surviving rows, so a writer rederiving the next seq from
+        # the table alone would reissue a seq a client cursor already
+        # consumed; the floor keeps seq strictly increasing across deletions,
+        # like the memory and JSONL stores' per-thread counters.
+        # delete_by_thread retires it together with the thread's rows.
+        self._seq_high_water: dict[str, int] = {}
 
     def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
         """Return (creating if needed) the per-thread seq-assignment lock."""
@@ -185,6 +192,17 @@ class DbRunEventStore(RunEventStore):
 
         return await session.scalar(stmt.with_for_update())
 
+    def _next_seq(self, thread_id: str, max_seq: int | None) -> int:
+        """Return the next seq for the thread, never one already handed out.
+
+        ``max_seq`` reflects only the surviving rows, which ``delete_by_run``
+        can lower; the high-water mark keeps the assigned value strictly
+        increasing across deletions. Called under the per-thread write lock.
+        """
+        seq = max(max_seq or 0, self._seq_high_water.get(thread_id, 0)) + 1
+        self._seq_high_water[thread_id] = seq
+        return seq
+
     async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None):  # noqa: D401
         """Write a single event — low-frequency path only.
 
@@ -201,7 +219,7 @@ class DbRunEventStore(RunEventStore):
             async with self._sf() as session:
                 async with session.begin():
                     max_seq = await self._max_seq_for_thread(session, thread_id)
-                    seq = (max_seq or 0) + 1
+                    seq = self._next_seq(thread_id, max_seq)
                     row = RunEventRow(
                         thread_id=thread_id,
                         run_id=run_id,
@@ -229,10 +247,9 @@ class DbRunEventStore(RunEventStore):
             async with self._sf() as session:
                 async with session.begin():
                     max_seq = await self._max_seq_for_thread(session, thread_id)
-                    seq = max_seq or 0
                     rows = []
                     for e in events:
-                        seq += 1
+                        seq = self._next_seq(thread_id, max_seq)
                         content = e.get("content", "")
                         category = e.get("category", "trace")
                         metadata = e.get("metadata")
@@ -300,7 +317,7 @@ class DbRunEventStore(RunEventStore):
                         category=category,
                         content=db_content,
                         event_metadata=metadata,
-                        seq=(max_seq or 0) + 1,
+                        seq=self._next_seq(thread_id, max_seq),
                         created_at=datetime.fromisoformat(created_at) if created_at else datetime.now(UTC),
                     )
                     session.add(row)
@@ -537,6 +554,7 @@ class DbRunEventStore(RunEventStore):
             # later caller therefore resolves that same lock instead of racing
             # it with a fresh one.
             self._write_lock_pins.pop(thread_id, None)
+            self._seq_high_water.pop(thread_id, None)
         return count
 
     async def delete_by_run(

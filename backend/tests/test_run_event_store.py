@@ -493,6 +493,51 @@ class TestDelete:
         assert messages[0]["run_id"] == "r1"
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize("backend", ["memory", "jsonl", "db"])
+    async def test_delete_by_run_keeps_seq_strictly_increasing(self, tmp_path, backend):
+        """A seq handed out before delete_by_run is spent forever.
+
+        The contract promises seq is strictly increasing within a thread, and
+        clients paginate with ``after_seq`` cursors: a reissued seq makes every
+        later event invisible to a cursor that already advanced past it. The
+        memory and JSONL stores keep a per-thread counter that delete_by_run
+        never lowers; the SQL store must not rederive a lower floor from the
+        surviving rows.
+        """
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        if backend == "db":
+            await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'test.db'}", sqlite_dir=str(tmp_path))
+            s = DbRunEventStore(get_session_factory())
+        elif backend == "jsonl":
+            s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        else:
+            s = MemoryRunEventStore()
+        try:
+            r1 = await s.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+            r2 = await s.put(thread_id="t1", run_id="r2", event_type="human_message", category="message")
+            assert r2["seq"] > r1["seq"]
+            assert await s.delete_by_run("t1", "r2") == 1
+
+            r3 = await s.put(thread_id="t1", run_id="r3", event_type="human_message", category="message")
+            assert r3["seq"] > r2["seq"]
+            assert [m["run_id"] for m in await s.list_messages("t1", after_seq=r2["seq"])] == ["r3"]
+
+            assert await s.delete_by_run("t1", "r3") == 1
+            batch = await s.put_batch([{"thread_id": "t1", "run_id": "r4", "event_type": "ai_message", "category": "message"}])
+            assert batch[0]["seq"] > r3["seq"]
+
+            assert await s.delete_by_run("t1", "r4") == 1
+            receipt, created = await s.put_if_absent(thread_id="t1", run_id="r5", event_type="run.delivery", category="outputs")
+            assert created is True
+            assert receipt["seq"] > batch[0]["seq"]
+        finally:
+            if backend == "db":
+                await close_engine()
+
+    @pytest.mark.anyio
     async def test_delete_by_thread_accepts_owner_scope(self, store):
         """Every backend accepts the owner scope the Gateway passes (#2803 wiring).
 
