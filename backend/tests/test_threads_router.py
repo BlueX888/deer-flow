@@ -3418,8 +3418,15 @@ def test_state_endpoints_preserve_extension_reducer_channels(monkeypatch, mode) 
     recorded_updates: list[dict] = []
     real_mutation_builder = gateway_services.build_checkpoint_state_mutation_accessor
 
-    def recording_mutation_builder(request, *, thread_id, as_node, checkpoint_id=None, state_schema=None):
-        accessor, config = real_mutation_builder(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id, state_schema=state_schema)
+    def recording_mutation_builder(request, *, thread_id, as_node, checkpoint_id=None, checkpoint_ns="", state_schema=None):
+        accessor, config = real_mutation_builder(
+            request,
+            thread_id=thread_id,
+            as_node=as_node,
+            checkpoint_id=checkpoint_id,
+            checkpoint_ns=checkpoint_ns,
+            state_schema=state_schema,
+        )
         original_aupdate = accessor.aupdate
 
         async def recording_aupdate(config, values, *, as_node=None):
@@ -4394,6 +4401,74 @@ def test_update_thread_state_real_mutation_graph_finishes_without_scheduling(mon
     assert body["values"]["artifacts"] == ["artifact-1"]
     assert body["values"]["title"] == "Renamed"
     assert body["next"] == []
+
+
+def test_update_thread_state_forks_from_checkpoint_object(monkeypatch) -> None:
+    """A ``checkpoint`` object must select the checkpoint to update.
+
+    LangGraph SDK clients (``client.threads.update_state(..., checkpoint=...)``
+    and ``RemoteGraph.update_state``) send the full checkpoint object instead
+    of the deprecated ``checkpoint_id`` field. Ignoring it silently rewrites
+    the current head checkpoint instead of forking from the requested one.
+    """
+    app, _store, _checkpointer = _build_thread_app()
+    real_mutation_builder = gateway_services.build_checkpoint_state_mutation_accessor
+
+    async def mutation_boundary(request, *, thread_id, as_node, checkpoint_id=None, **kwargs):
+        # No real assistant graph in this unit context: the boundary falls
+        # back to the base schema while writes still use the mutation graph.
+        return real_mutation_builder(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id, **kwargs)
+
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", mutation_boundary)
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": "state-checkpoint-object", "metadata": {}},
+        )
+        assert created.status_code == 200, created.text
+
+        first = client.post(
+            "/api/threads/state-checkpoint-object/state",
+            json={"values": {"messages": [{"type": "human", "id": "h1", "content": "first"}]}},
+        )
+        assert first.status_code == 200, first.text
+        first_checkpoint_id = first.json()["checkpoint_id"]
+
+        second = client.post(
+            "/api/threads/state-checkpoint-object/state",
+            json={
+                "values": {
+                    "messages": [
+                        {"type": "human", "id": "h1", "content": "first"},
+                        {"type": "ai", "id": "a1", "content": "answer"},
+                    ]
+                }
+            },
+        )
+        assert second.status_code == 200, second.text
+        head_checkpoint_id = second.json()["checkpoint_id"]
+        assert head_checkpoint_id != first_checkpoint_id
+        assert second.json()["parent_checkpoint_id"] == first_checkpoint_id
+
+        forked = client.post(
+            "/api/threads/state-checkpoint-object/state",
+            json={
+                "values": {"messages": [{"type": "human", "id": "h1", "content": "edited"}]},
+                "checkpoint": {
+                    "thread_id": "state-checkpoint-object",
+                    "checkpoint_ns": "",
+                    "checkpoint_id": first_checkpoint_id,
+                },
+            },
+        )
+
+    assert forked.status_code == 200, forked.text
+    body = forked.json()
+    assert body["parent_checkpoint_id"] == first_checkpoint_id
+    assert body["parent_checkpoint_id"] != head_checkpoint_id
+    assert [message["id"] for message in body["values"]["messages"]] == ["h1"]
+    assert body["values"]["messages"][0]["content"] == "edited"
 
 
 @pytest.mark.parametrize("missing_checkpoint_id", ["does-not-exist", ""])

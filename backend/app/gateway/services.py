@@ -1224,11 +1224,14 @@ def build_checkpoint_state_mutation_accessor(
     thread_id: str,
     as_node: str,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
     state_schema: Any | None = None,
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Build a state-only graph whose writer node finishes immediately.
 
-    ``state_schema`` should be the thread's effective schema (from
+    ``checkpoint_id``/``checkpoint_ns`` select the checkpoint the update is
+    applied to; omitting them writes to the current head. ``state_schema``
+    should be the thread's effective schema (from
     :func:`graph_state_schema` on the assistant graph) whenever the write
     carries materialized state; with the base-schema fallback, channels
     contributed by custom middleware are silently discarded.
@@ -1237,7 +1240,7 @@ def build_checkpoint_state_mutation_accessor(
     config: dict[str, Any] = {
         "configurable": {
             "thread_id": thread_id,
-            "checkpoint_ns": "",
+            "checkpoint_ns": checkpoint_ns,
         }
     }
     if checkpoint_id is not None:
@@ -1414,12 +1417,13 @@ def build_checkpoint_state_accessor(
     thread_id: str,
     assistant_id: str | None = None,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Build the mode-selected lead graph used for materialized checkpoint state."""
     ctx = get_run_context(request)
     config = build_run_config(thread_id, None, None, assistant_id=assistant_id)
     configurable = config.setdefault("configurable", {})
-    configurable["checkpoint_ns"] = ""
+    configurable["checkpoint_ns"] = checkpoint_ns
     if checkpoint_id is not None:
         configurable["checkpoint_id"] = checkpoint_id
 
@@ -1465,6 +1469,7 @@ async def abuild_checkpoint_state_accessor(
     thread_id: str,
     assistant_id: str | None = None,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Async variant of :func:`build_checkpoint_state_accessor`.
 
@@ -1484,6 +1489,7 @@ async def abuild_checkpoint_state_accessor(
         thread_id=thread_id,
         assistant_id=assistant_id,
         checkpoint_id=checkpoint_id,
+        checkpoint_ns=checkpoint_ns,
     )
 
 
@@ -1517,6 +1523,7 @@ async def build_thread_checkpoint_state_accessor(
     *,
     thread_id: str,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
     fail_closed: bool = False,
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Single resolution boundary for state endpoints.
@@ -1531,6 +1538,7 @@ async def build_thread_checkpoint_state_accessor(
         thread_id=thread_id,
         assistant_id=assistant_id,
         checkpoint_id=checkpoint_id,
+        checkpoint_ns=checkpoint_ns,
     )
 
 
@@ -1540,6 +1548,7 @@ async def build_thread_checkpoint_state_mutation_accessor(
     thread_id: str,
     as_node: str,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Mutation accessor compiled with the thread's effective state schema.
 
@@ -1551,6 +1560,7 @@ async def build_thread_checkpoint_state_mutation_accessor(
         request,
         thread_id=thread_id,
         checkpoint_id=checkpoint_id,
+        checkpoint_ns=checkpoint_ns,
         fail_closed=True,
     )
     state_schema = graph_state_schema(getattr(read_accessor, "graph", None))
@@ -1559,6 +1569,7 @@ async def build_thread_checkpoint_state_mutation_accessor(
         thread_id=thread_id,
         as_node=as_node,
         checkpoint_id=checkpoint_id,
+        checkpoint_ns=checkpoint_ns,
         state_schema=state_schema,
     )
 
