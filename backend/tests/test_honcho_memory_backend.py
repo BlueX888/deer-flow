@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from types import SimpleNamespace
 
 import httpx
@@ -628,6 +629,24 @@ class TestHonchoManagerRead:
         results = mgr.search("q", top_k=3, user_id="u1")
         assert fake.calls[-1] == ("search", ("shared", "q", 3, None))
         assert results == [{"content": "found", "category": "memory", "session_id": "df-t", "peer_id": "deerflow", "created_at": "2026-01-01"}]
+
+    def test_search_category_filter_logs_the_metadata_gap(self, caplog):
+        """A category-scoped query filters on ``metadata.category``, but nothing
+        this backend writes carries that field, so the empty result is expected
+        rather than an outage. Log the gap when the filter is applied so an
+        operator can tell the two apart; unscoped searches stay silent."""
+        mgr, fake = _manager(workspace_overrides={"u1": "shared"})
+        with caplog.at_level(logging.INFO, logger="deerflow.agents.memory.backends.honcho.honcho_manager"):
+            mgr.search("q", top_k=3, user_id="u1")
+            assert not any("category filter" in record.getMessage() for record in caplog.records)
+
+            hits = mgr.search("q", top_k=3, user_id="u1", category="preference")
+
+        # The filter still scopes the wire request and results still flow back.
+        assert fake.calls[-1] == ("search", ("shared", "q", 3, {"metadata": {"category": "preference"}}))
+        assert hits
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("category filter" in message and "metadata.category" in message and "may be empty" in message for message in messages)
 
     def test_search_without_user_is_empty(self):
         mgr, _ = _manager()

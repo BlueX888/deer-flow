@@ -81,6 +81,11 @@ cannot see each other's memory by construction.
   unsupported-operation error; conversation writes still happen through the
   retained middleware. DeerMem remains the default backend.
 - No migration of existing DeerMem data.
+- Category-scoped `memory_search` returns no matches: `add()` writes plain
+  messages with no metadata and fact CRUD is unsupported, so no stored record
+  carries `metadata.category`. The filter is still sent server-side and its
+  application is logged, so an empty result is the expected outcome here until
+  the write path gains metadata support — not an outage.
 - Writes are fire-and-forget per call: a failed write is logged and dropped
   (at-most-once); nothing is buffered locally, so `shutdown_flush` is a no-op.
 - `agent_name` is not mapped — Honcho models the user, not per-agent facts.
