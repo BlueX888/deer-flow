@@ -90,7 +90,9 @@ def _list_assistants() -> list[AssistantResponse]:
 async def search_assistants(body: AssistantSearchRequest | None = None) -> list[AssistantResponse]:
     """Search assistants.
 
-    Returns all registered assistants (lead_agent + custom agents from config).
+    Filters the registered assistants (lead_agent + custom agents from config)
+    by graph_id, name substring, and an exact-match metadata filter, then
+    applies offset/limit.
     """
     # _list_assistants reads custom agents through the sync agent store (file IO
     # or a DB round trip), so keep it off the event loop.
@@ -100,6 +102,9 @@ async def search_assistants(body: AssistantSearchRequest | None = None) -> list[
         assistants = [a for a in assistants if a.graph_id == body.graph_id]
     if body and body.name:
         assistants = [a for a in assistants if body.name.lower() in a.name.lower()]
+    if body and body.metadata:
+        # LangGraph SDK contract: exact match for every requested key/value.
+        assistants = [a for a in assistants if all(a.metadata.get(key) == value for key, value in body.metadata.items())]
 
     offset = body.offset if body else 0
     limit = body.limit if body else 10

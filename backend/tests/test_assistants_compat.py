@@ -59,3 +59,57 @@ def test_search_preserves_default_and_positive_offset(monkeypatch: pytest.Monkey
     assert [assistant["assistant_id"] for assistant in default_response.json()] == ["lead_agent", "researcher", "writer"]
     assert offset_response.status_code == 200
     assert [assistant["assistant_id"] for assistant in offset_response.json()] == ["researcher"]
+
+
+def _assistant_with_metadata(name: str, metadata: dict[str, object]) -> assistants_compat.AssistantResponse:
+    return assistants_compat.AssistantResponse(
+        assistant_id=name,
+        graph_id="lead_agent",
+        name=name,
+        metadata=metadata,
+    )
+
+
+def _make_app_with_metadata(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
+    app = FastAPI()
+    app.include_router(assistants_compat.router)
+    monkeypatch.setattr(
+        assistants_compat,
+        "_list_assistants",
+        lambda: [
+            _assistant_with_metadata("lead_agent", {"created_by": "system"}),
+            _assistant_with_metadata("researcher", {"created_by": "user", "team": "research"}),
+            _assistant_with_metadata("writer", {"created_by": "user", "team": "content"}),
+        ],
+    )
+    return app
+
+
+def test_search_filters_by_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    with TestClient(_make_app_with_metadata(monkeypatch)) as client:
+        single_key = client.post("/api/assistants/search", json={"metadata": {"created_by": "user"}})
+        both_keys = client.post(
+            "/api/assistants/search",
+            json={"metadata": {"created_by": "user", "team": "research"}},
+        )
+
+    assert single_key.status_code == 200
+    assert [assistant["assistant_id"] for assistant in single_key.json()] == ["researcher", "writer"]
+    assert both_keys.status_code == 200
+    assert [assistant["assistant_id"] for assistant in both_keys.json()] == ["researcher"]
+
+
+def test_search_metadata_matching_nothing_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    with TestClient(_make_app_with_metadata(monkeypatch)) as client:
+        response = client.post("/api/assistants/search", json={"metadata": {"created_by": "nobody"}})
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_search_without_metadata_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    with TestClient(_make_app_with_metadata(monkeypatch)) as client:
+        response = client.post("/api/assistants/search", json={"graph_id": "lead_agent"})
+
+    assert response.status_code == 200
+    assert [assistant["assistant_id"] for assistant in response.json()] == ["lead_agent", "researcher", "writer"]
