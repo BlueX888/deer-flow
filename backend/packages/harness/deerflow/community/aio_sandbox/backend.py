@@ -125,7 +125,7 @@ async def wait_for_sandbox_ready_async(
     }
     if headers:
         client_kwargs["headers"] = dict(headers)
-    async with httpx.AsyncClient(**client_kwargs) as client:
+    async with await asyncio.to_thread(httpx.AsyncClient, **client_kwargs) as client:
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:

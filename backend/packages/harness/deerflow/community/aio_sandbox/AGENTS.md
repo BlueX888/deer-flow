@@ -1,5 +1,12 @@
 # AIO Sandbox
 
+## Readiness polling
+
+`wait_for_sandbox_ready_async` constructs its HTTPX client with
+`asyncio.to_thread` so the synchronous TLS trust load does not block the
+gateway event loop; requests and cleanup stay on-loop. Regression:
+`tests/blocking_io/test_aio_sandbox_readiness_ssl.py`.
+
 ## Stdin contracts per transport
 
 AIO has two distinct stdin contracts: the persistent `/v1/shell` transport is a
