@@ -1004,7 +1004,7 @@ async def oauth_login(
     try:
         metadata = await service.discover(provider_config.issuer, overrides)
     except OIDCError as exc:
-        logger.error("OIDC discovery failed for provider %s: %s", provider, exc)
+        logger.error("OIDC discovery failed for provider %s: %s", provider, sanitize_log_param(str(exc)))
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to connect to SSO provider")
 
     auth_url = service.build_authorization_url(
@@ -1098,7 +1098,7 @@ async def oauth_callback(
     try:
         metadata = await service.discover(provider_config.issuer, overrides)
     except OIDCError as exc:
-        logger.error("OIDC discovery failed for provider %s during callback: %s", provider, exc)
+        logger.error("OIDC discovery failed for provider %s during callback: %s", provider, sanitize_log_param(str(exc)))
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to connect to SSO provider")
 
     # ── Authenticate ─────────────────────────────────────────────────
@@ -1115,7 +1115,7 @@ async def oauth_callback(
             auth_method=provider_config.token_endpoint_auth_method,
         )
     except OIDCError as exc:
-        logger.error("OIDC callback authentication failed for %s: %s", provider, exc)
+        logger.error("OIDC callback authentication failed for %s: %s", provider, sanitize_log_param(str(exc)))
         redirect = _build_error_redirect(oidc_config.frontend_base_url, "sso_failed")
         return RedirectResponse(url=redirect, status_code=status.HTTP_302_FOUND)
 
@@ -1128,7 +1128,7 @@ async def oauth_callback(
             status.HTTP_409_CONFLICT: "sso_account_exists",
         }
         error_code = error_map.get(exc.status_code, "sso_failed")
-        logger.warning("OIDC user provisioning failed for %s (%s): %s", identity.email, provider, exc.detail)
+        logger.warning("OIDC user provisioning failed for %s (%s): %s", sanitize_log_param(identity.email), provider, sanitize_log_param(str(exc.detail)))
         redirect = _build_error_redirect(oidc_config.frontend_base_url, error_code)
         return RedirectResponse(url=redirect, status_code=status.HTTP_302_FOUND)
 
