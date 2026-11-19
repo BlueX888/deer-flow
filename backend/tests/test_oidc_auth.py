@@ -910,7 +910,7 @@ async def test_oidc_userinfo_without_sub_cannot_make_a_first_login_an_admin():
     local_provider.create_oauth_user.assert_awaited_once_with(email="user@example.com", oauth_provider="keycloak", oauth_id="s1", system_role="user")
 
 
-def _oidc_router_client(monkeypatch, service: OIDCService, *, enabled: bool = True):
+def _oidc_router_client(monkeypatch, service: OIDCService, *, enabled: bool = True, provider_config: OIDCProviderConfig | None = None):
     from types import SimpleNamespace
 
     from fastapi import FastAPI
@@ -921,7 +921,7 @@ def _oidc_router_client(monkeypatch, service: OIDCService, *, enabled: bool = Tr
     from app.gateway.auth.config import AuthConfig
     from app.gateway.routers import auth as auth_router
 
-    oidc_config = SimpleNamespace(enabled=enabled, providers={"keycloak": _provider_config()}, frontend_base_url="")
+    oidc_config = SimpleNamespace(enabled=enabled, providers={"keycloak": provider_config or _provider_config()}, frontend_base_url="")
     monkeypatch.setattr(app_config_module, "get_app_config", lambda: SimpleNamespace(auth=SimpleNamespace(oidc=oidc_config)))
     monkeypatch.setattr(auth_router, "_get_oidc_service", lambda: service)
     monkeypatch.setattr(oidc_state, "get_auth_config", lambda: AuthConfig(jwt_secret="test-secret-for-oidc-malformed-bodies-min-32"))
@@ -999,3 +999,92 @@ def test_oidc_callback_provider_error_log_without_description(monkeypatch, caplo
     assert response.status_code == 302
     [record] = [r for r in caplog.records if r.name == "app.gateway.routers.auth"]
     assert record.getMessage() == "OIDC provider returned error for keycloak: access_denied (description: None)"
+
+
+_TOKEN_ERROR_PAGE = httpx.Response(400, text=f"<html>token endpoint down{_FORGED_LOG_LINE}</html>", headers={"content-type": "text/html"})
+
+
+def test_oidc_callback_auth_error_log_strips_newlines(monkeypatch, caplog):
+    """_fetch_token copies the token endpoint body into OIDCError, and that text reaches the callback log."""
+    from app.gateway.auth.oidc_state import OIDCStatePayload, _sign_state_payload
+
+    service = _service_answering({"/.well-known/openid-configuration": _DISCOVERY, "/token": _TOKEN_ERROR_PAGE})
+    client = _oidc_router_client(monkeypatch, service)
+    client.cookies.set("df_oidc_state_keycloak", _sign_state_payload(OIDCStatePayload(provider="keycloak", state="expected-state")))
+
+    try:
+        with caplog.at_level("ERROR", logger="app.gateway.routers.auth"):
+            response = client.get("/api/v1/auth/callback/keycloak", params={"code": "code", "state": "expected-state"})
+    finally:
+        asyncio.run(service.close())
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/login?error=sso_failed"
+    [record] = [r for r in caplog.records if r.name == "app.gateway.routers.auth"]
+    logged = record.getMessage()
+    assert "\n" not in logged
+    assert "\r" not in logged
+    joined = _FORGED_LOG_LINE.replace("\n", "").replace("\r", "")
+    assert f"OIDC callback authentication failed for keycloak: Token exchange failed: HTTP 400 — <html>token endpoint down{joined}</html>" in logged
+
+
+def test_oidc_callback_provisioning_error_log_strips_newlines(monkeypatch, caplog):
+    """identity.email is logged before any email validation, so a provider-chosen newline must not split the line."""
+    from app.gateway.auth.oidc_state import OIDCStatePayload, _sign_state_payload
+    from app.gateway.routers import auth as auth_router
+
+    id_token, jwks = _signed_provider(email=f"user@example.com{_FORGED_LOG_LINE}")
+    service = _service_answering({"/.well-known/openid-configuration": _DISCOVERY, "/token": {"id_token": id_token}, "/jwks": jwks})
+    client = _oidc_router_client(monkeypatch, service, provider_config=_provider_config(allowed_email_domains=["example.com"]))
+    local_provider = AsyncMock()
+    local_provider.get_user_by_oauth.return_value = None
+    monkeypatch.setattr(auth_router, "get_local_provider", lambda: local_provider)
+    client.cookies.set("df_oidc_state_keycloak", _sign_state_payload(OIDCStatePayload(provider="keycloak", state="expected-state")))
+
+    try:
+        with caplog.at_level("WARNING", logger="app.gateway.routers.auth"):
+            response = client.get("/api/v1/auth/callback/keycloak", params={"code": "code", "state": "expected-state"})
+    finally:
+        asyncio.run(service.close())
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/login?error=sso_not_allowed"
+    [record] = [r for r in caplog.records if r.name == "app.gateway.routers.auth"]
+    logged = record.getMessage()
+    assert "\n" not in logged
+    assert "\r" not in logged
+    joined = _FORGED_LOG_LINE.replace("\n", "").replace("\r", "")
+    assert f"OIDC user provisioning failed for user@example.com{joined} (keycloak): Your email domain is not allowed." in logged
+
+
+@pytest.mark.parametrize(
+    ("path", "params"),
+    [
+        ("/api/v1/auth/oauth/keycloak", {}),
+        ("/api/v1/auth/callback/keycloak", {"code": "code", "state": "expected-state"}),
+    ],
+    ids=["login", "callback"],
+)
+def test_oidc_discovery_error_log_strips_newlines(monkeypatch, caplog, path, params):
+    """The discovered issuer is provider-controlled text and reaches both discovery failure logs."""
+    from app.gateway.auth.oidc_state import OIDCStatePayload, _sign_state_payload
+
+    forged_issuer = f"https://evil.example{_FORGED_LOG_LINE}"
+    service = _service_answering({"/.well-known/openid-configuration": {**_DISCOVERY, "issuer": forged_issuer}})
+    client = _oidc_router_client(monkeypatch, service)
+    client.cookies.set("df_oidc_state_keycloak", _sign_state_payload(OIDCStatePayload(provider="keycloak", state="expected-state")))
+
+    try:
+        with caplog.at_level("ERROR", logger="app.gateway.routers.auth"):
+            response = client.get(path, params=params)
+    finally:
+        asyncio.run(service.close())
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Failed to connect to SSO provider"}
+    [record] = [r for r in caplog.records if r.name == "app.gateway.routers.auth"]
+    logged = record.getMessage()
+    assert "\n" not in logged
+    assert "\r" not in logged
+    joined = _FORGED_LOG_LINE.replace("\n", "").replace("\r", "")
+    assert f"'{forged_issuer[: -len(_FORGED_LOG_LINE)]}{joined}'" in logged
